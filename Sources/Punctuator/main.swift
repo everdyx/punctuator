@@ -296,16 +296,9 @@ final class PunctuationReplacer {
             return
         }
 
-        if replaceSelectedRangeValueWithAccessibility(replacement) {
+        if replaceSelectedRangeValueWithAccessibility(replacement, originalText: selectedText) {
             let readPath = usedAccessibilityRead ? "AX" : "Copy fallback"
             onDiagnostic?("\(readPath) read; AX range replaced \(debugText(selectedText)) -> \(debugText(replacement))")
-            savedPasteboard.restore(to: pasteboard)
-            return
-        }
-
-        if replaceSelectedTextWithAccessibility(replacement) {
-            let readPath = usedAccessibilityRead ? "AX" : "Copy fallback"
-            onDiagnostic?("\(readPath) read; AX selectedText replaced \(debugText(selectedText)) -> \(debugText(replacement))")
             savedPasteboard.restore(to: pasteboard)
             return
         }
@@ -328,7 +321,8 @@ final class PunctuationReplacer {
     private func pasteReplacement(_ text: String) {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        commandKeyStroke(keyCode: UInt16(kVK_ANSI_V))
+        Thread.sleep(forTimeInterval: 0.12)
+        commandKeyStroke(keyCode: UInt16(kVK_ANSI_V), tap: .cgSessionEventTap)
     }
 
     private func readSelectedTextWithAccessibility() -> String? {
@@ -350,21 +344,7 @@ final class PunctuationReplacer {
         return value as? String
     }
 
-    private func replaceSelectedTextWithAccessibility(_ text: String) -> Bool {
-        guard let focusedElement = focusedAccessibilityElement() else {
-            return false
-        }
-
-        let result = AXUIElementSetAttributeValue(
-            focusedElement,
-            kAXSelectedTextAttribute as CFString,
-            text as CFString
-        )
-
-        return result == .success
-    }
-
-    private func replaceSelectedRangeValueWithAccessibility(_ text: String) -> Bool {
+    private func replaceSelectedRangeValueWithAccessibility(_ text: String, originalText: String) -> Bool {
         guard
             let focusedElement = focusedAccessibilityElement(),
             let selectedRange = selectedTextRange(in: focusedElement),
@@ -394,7 +374,30 @@ final class PunctuationReplacer {
         let caretLocation = selectedRange.location + (text as NSString).length
         moveCaret(in: focusedElement, to: caretLocation)
 
-        return true
+        Thread.sleep(forTimeInterval: 0.06)
+        return didReplaceText(
+            in: focusedElement,
+            originalValue: currentValue,
+            updatedValue: updatedValue,
+            originalText: originalText
+        )
+    }
+
+    private func didReplaceText(
+        in element: AXUIElement,
+        originalValue: String,
+        updatedValue: String,
+        originalText: String
+    ) -> Bool {
+        if let currentValue = textValue(in: element) {
+            return currentValue == updatedValue && currentValue != originalValue
+        }
+
+        if let selectedText = readSelectedTextWithAccessibility() {
+            return selectedText != originalText
+        }
+
+        return false
     }
 
     private func moveCaret(in element: AXUIElement, to location: CFIndex) {
@@ -506,7 +509,7 @@ final class PunctuationReplacer {
         up.post(tap: .cghidEventTap)
     }
 
-    private func commandKeyStroke(keyCode: UInt16) {
+    private func commandKeyStroke(keyCode: UInt16, tap: CGEventTapLocation = .cghidEventTap) {
         guard
             let source = CGEventSource(stateID: .hidSystemState),
             let commandDown = CGEvent(keyboardEventSource: source, virtualKey: UInt16(kVK_Command), keyDown: true),
@@ -522,12 +525,12 @@ final class PunctuationReplacer {
         keyUp.flags = .maskCommand
         commandUp.flags = []
 
-        commandDown.post(tap: .cghidEventTap)
+        commandDown.post(tap: tap)
         Thread.sleep(forTimeInterval: 0.015)
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
+        keyDown.post(tap: tap)
+        keyUp.post(tap: tap)
         Thread.sleep(forTimeInterval: 0.015)
-        commandUp.post(tap: .cghidEventTap)
+        commandUp.post(tap: tap)
     }
 
 }
