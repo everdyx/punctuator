@@ -18,6 +18,7 @@ let package = Package(
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("Carbon")
             ]
-        )
+        ),
+        .testTarget(name: "PunctuatorTests", dependencies: ["Punctuator"])
     ]
 )

@@ -2,31 +2,11 @@ import AppKit
 import ApplicationServices
 import Carbon
 
-private let rightShiftKeyCode: CGKeyCode = 60
-
-private let punctuationMap: [String: String] = [
-    "。": ".",
-    "，": ",",
-    "、": "\\",
-    "？": "?",
-    "！": "!",
-    "：": ":",
-    "；": ";",
-    "（": "(",
-    "）": ")",
-    "【": "[",
-    "】": "]",
-    "《": "<",
-    "》": ">",
-    "“": "\"",
-    "”": "\"",
-    "‘": "'",
-    "’": "'"
-]
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private let eventTap = RightShiftEventTap()
+    private let eventTap = TriggerEventTap()
+    private let settingsStore = SettingsStore()
+    private var settingsWindow: SettingsWindowController?
     private let replacer = PunctuationReplacer()
     private var statusMenuItem: NSMenuItem!
     private var lastActionMenuItem: NSMenuItem!
@@ -37,9 +17,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        applySettings()
         setupStatusItem()
         requestPermissionsIfNeeded()
 
+        eventTap.shouldPassThrough = { [weak self] in
+            self?.settingsWindow?.window?.isKeyWindow == true
+        }
         eventTap.onTrigger = { [weak self] in
             self?.replacer.replacePunctuationBeforeCursor()
         }
@@ -84,6 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enabledMenuItem.target = self
         enabledMenuItem.state = .on
         menu.addItem(enabledMenuItem)
+
+        let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         let retryItem = NSMenuItem(
             title: "Retry Permissions",
@@ -158,6 +146,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = eventTap.isEnabled ? (isReady ? "P." : "P?") : "P-"
     }
 
+    private func applySettings() {
+        eventTap.triggerKey = settingsStore.current.triggerKey
+        replacer.punctuationMap = settingsStore.current.punctuationMap
+    }
+
+    @objc private func openSettings() {
+        if let window = settingsWindow?.window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            settingsWindow = SettingsWindowController(settings: settingsStore.current) { [weak self] settings in
+                guard let self else { return }
+                try self.settingsStore.save(settings)
+                self.applySettings()
+            }
+            settingsWindow?.showWindow(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     @objc private func toggleEnabled() {
         eventTap.isEnabled.toggle()
         enabledMenuItem.state = eventTap.isEnabled ? .on : .off
@@ -186,13 +193,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-final class RightShiftEventTap {
+final class TriggerEventTap {
+    var shouldPassThrough: (() -> Bool)?
     var onTrigger: (() -> Void)?
-    var isEnabled = true
+    var isEnabled = true { didSet { triggerIsDown = false } }
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var rightShiftIsDown = false
+    var triggerKey: TriggerKey = .rightShift {
+        didSet { triggerIsDown = false }
+    }
+    private var triggerIsDown = false
     private(set) var isRunning = false
 
     func start() -> Bool {
@@ -239,19 +250,31 @@ final class RightShiftEventTap {
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
-        if type == .flagsChanged, keyCode == rightShiftKeyCode {
-            if rightShiftIsDown {
-                rightShiftIsDown = false
-                DispatchQueue.main.async { [onTrigger] in
-                    onTrigger?()
-                }
-            } else {
-                rightShiftIsDown = true
-            }
+        if type == .flagsChanged, handleModifier(keyCode: keyCode, flags: event.flags) {
             return nil
         }
-
         return Unmanaged.passUnretained(event)
+    }
+
+    // Returns true when the selected modifier event has been consumed.
+    @discardableResult
+    func handleModifier(keyCode: CGKeyCode, flags: CGEventFlags) -> Bool {
+        if shouldPassThrough?() == true {
+            triggerIsDown = false
+            return false
+        }
+        guard isEnabled, keyCode == triggerKey.keyCode else { return false }
+        let isDown = flags.rawValue & triggerKey.deviceMask != 0
+        let shouldTrigger = triggerIsDown && !isDown
+        triggerIsDown = isDown
+        if shouldTrigger {
+            let selectedKey = triggerKey
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isEnabled, self.triggerKey == selectedKey else { return }
+                self.onTrigger?()
+            }
+        }
+        return true
     }
 
 }
@@ -261,11 +284,12 @@ private let eventTapCallback: CGEventTapCallBack = { proxy, type, event, userInf
         return Unmanaged.passUnretained(event)
     }
 
-    let tap = Unmanaged<RightShiftEventTap>.fromOpaque(userInfo).takeUnretainedValue()
+    let tap = Unmanaged<TriggerEventTap>.fromOpaque(userInfo).takeUnretainedValue()
     return tap.handle(proxy: proxy, type: type, event: event)
 }
 
 final class PunctuationReplacer {
+    var punctuationMap: [String: String] = [:]
     var onDiagnostic: ((String) -> Void)?
 
     private let pasteboard = NSPasteboard.general
